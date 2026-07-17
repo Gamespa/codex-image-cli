@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Image"
+  short_description: "Generate images through the active Codex provider"
+  default_prompt: "Use $codex-image to generate an image with the current Codex provider."

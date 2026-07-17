@@ -38,3 +38,8 @@ an image URL or `b64_json`. The CLI adds a stable `User-Agent` and defaults to a
 - Do not pass API keys with command-line flags.
 - Do not commit `.codex/`, `auth.json`, generated images, or `.env` files.
 - Prompts are sent to the configured provider but are not saved by this CLI.
+
+## Codex Skill
+
+The repository includes a lightweight `skills/codex-image` skill. Install the CLI first, then copy or
+link that folder into `~/.codex/skills/codex-image` so Codex can invoke the command for image requests.
