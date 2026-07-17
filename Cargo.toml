@@ -2,6 +2,11 @@
 name = "codex-image-cli"
 version = "0.1.0"
 edition = "2024"
+autobins = false
+
+[[bin]]
+name = "codex-image"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
