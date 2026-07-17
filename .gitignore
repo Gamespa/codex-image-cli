@@ -1,3 +1,7 @@
-/target
-generated_images/
+/target/
+/generated_images/
 .env
+.env.*
+.codex/
+.codex-image-runs/
+auth.json

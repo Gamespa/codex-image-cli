@@ -1,45 +1,101 @@
 # codex-image-cli
 
-`codex-image-cli` adds an Images Generations command for the provider currently configured in Codex.
-It reads the active provider base URL from `~/.codex/config.toml` and resolves credentials from the
-provider's `env_key` or, when configured, `~/.codex/auth.json`. It never writes credentials to disk,
-prints them, or accepts them as command-line arguments.
+`codex-image-cli` calls an OpenAI-compatible Images Generations endpoint through the provider
+configured in Codex. It resolves the active provider URL and credential without accepting API keys
+as command-line values.
+
+## Install
+
+```powershell
+cargo install --path . --locked
+```
+
+The installed binary is named `codex-image`.
 
 ## Usage
 
 ```powershell
-cargo run -- generate `
+codex-image generate `
   --prompt "A red circle centered on a white background" `
   --model gpt-image-2 `
   --size 1024x1024
 ```
 
-Images are written to `generated_images/` by default. The command writes a JSON summary containing
-the generated file paths and any upstream URLs.
+Images are written to `generated_images/` by default. A successful command prints one compact JSON
+summary containing the model, generated paths, and any upstream URLs. PNG, JPEG, WebP, and GIF are
+recognized from their file signatures instead of being assigned a fixed extension.
 
-Use `--output-dir` to choose another directory. Use `--base-url` and `--api-key-env` only when you
-intend to override the active Codex provider for a single command:
+Generation is bounded to 10 images, 50 MiB per image, and 180 seconds overall by default. Override
+the operational limits when needed. Base64 API responses also have an 80 MiB total JSON limit:
+
+```powershell
+codex-image generate `
+  --prompt "A high-resolution product texture" `
+  --n 2 `
+  --timeout-seconds 300 `
+  --max-image-mib 100 `
+  --output-dir generated_images
+```
+
+## Provider Resolution
+
+The CLI reads `CODEX_HOME/config.toml` or `~/.codex/config.toml`, selects `model_provider`, and uses
+the provider's `base_url` and `env_key`. Providers with `requires_openai_auth = true` fall back to
+`auth.json`. OpenAI defaults to `https://api.openai.com/v1`; Ollama and LM Studio default to their
+standard local URLs and do not require authentication.
+
+The selected provider must implement `POST /v1/images/generations` and return exactly the requested
+number of items using `b64_json` or an HTTP(S) image URL.
+
+Complete command overrides do not require a Codex config file:
 
 ```powershell
 $env:CODEX_IMAGE_KEY = "..."
-cargo run -- generate `
+codex-image generate `
   --base-url https://router.example/v1 `
   --api-key-env CODEX_IMAGE_KEY `
   --prompt "A paper-cut mountain landscape"
 ```
 
-## Provider Requirements
+For a trusted local endpoint that needs no Authorization header:
 
-The provider must support the OpenAI-compatible `POST /v1/images/generations` endpoint and return
-an image URL or `b64_json`. The CLI adds a stable `User-Agent` and defaults to a `1024x1024` request.
+```powershell
+codex-image generate `
+  --base-url http://127.0.0.1:8080/v1 `
+  --no-auth `
+  --prompt "A monochrome icon sheet"
+```
+
+Automation can use `--prompt-env NAME` instead of `--prompt`; the two options are mutually exclusive.
+
+## Reliability
+
+Responses and downloads have explicit size limits. URL images are streamed to a unique staging
+directory, validated, and committed only after the whole batch succeeds. A failed multi-image request
+therefore does not leave a partial batch that can be mistaken for success.
 
 ## Security
 
-- Do not pass API keys with command-line flags.
-- Do not commit `.codex/`, `auth.json`, generated images, or `.env` files.
-- Prompts are sent to the configured provider but are not saved by this CLI.
+- API keys are read from environment variables or Codex auth and are never accepted as CLI values.
+- `--no-auth` should only be used with a trusted local or otherwise protected endpoint.
+- Prompts are sent to the configured provider. Direct `--prompt` values may be visible in process
+  listings; automation should prefer `--prompt-env`.
+- Provider error text is bounded before being printed. A provider may still echo prompt content into
+  stderr, so treat failure logs as potentially sensitive.
+- Do not commit `.codex/`, `auth.json`, generated images, `.env` files, or `.codex-image-runs/`.
 
 ## Codex Skill
 
-The repository includes a lightweight `skills/codex-image` skill. Install the CLI first, then copy or
-link that folder into `~/.codex/skills/codex-image` so Codex can invoke the command for image requests.
+The repository includes `skills/codex-image`. Link or copy it to
+`~/.codex/skills/codex-image` after installing the CLI. The skill starts a detached worker, records
+its exit status, validates the CLI JSON summary, and cleans completed run logs older than seven days
+when a new run starts.
+
+## Development
+
+```powershell
+cargo fmt --all -- --check
+cargo test --all-targets --locked
+cargo clippy --all-targets --all-features --locked -- -D warnings
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/test-invoke-codex-image.ps1
+```
