@@ -154,6 +154,39 @@ exit 0
         Stop-Process -Id $timeoutProcess.Id -Force -ErrorAction SilentlyContinue
     }
 
+    $raceImagePath = Join-Path $testRoot 'race-image.png'
+    $raceResultPath = Join-Path $testRoot 'race.result.json'
+    $raceStdoutPath = Join-Path $testRoot 'race.stdout.log'
+    $raceStatePath = Join-Path $testRoot 'race.state.json'
+    [IO.File]::WriteAllBytes($raceImagePath, [byte[]](137, 80, 78, 71, 13, 10, 26, 10))
+    [ordered]@{
+        model = 'fake-model'
+        images = @([ordered]@{ path = $raceImagePath })
+    } | ConvertTo-Json -Depth 5 -Compress |
+        Set-Content -LiteralPath $raceStdoutPath -Encoding utf8
+    [ordered]@{
+        outputDir = $testRoot
+        expectedCount = 1
+        processId = 2147483647
+        processStartedAt = [DateTime]::UtcNow.AddMinutes(-1).ToString('o')
+        deadlineAt = [DateTime]::UtcNow.AddMinutes(1).ToString('o')
+        timeoutSeconds = 60
+        resultPath = $raceResultPath
+        stdoutPath = $raceStdoutPath
+        stderrPath = (Join-Path $testRoot 'race.stderr.log')
+        createdAt = [DateTime]::UtcNow.AddMinutes(-1).ToString('o')
+    } | ConvertTo-Json -Depth 5 -Compress |
+        Set-Content -LiteralPath $raceStatePath -Encoding utf8
+    $raceRunning = & $wrapper -Status -StatePath $raceStatePath | ConvertFrom-Json
+    Assert-Equal 'running' $raceRunning.status 'A missing result before the deadline must remain running.'
+    [ordered]@{
+        exitCode = 0
+        completedAt = [DateTime]::UtcNow.ToString('o')
+    } | ConvertTo-Json -Depth 5 -Compress |
+        Set-Content -LiteralPath $raceResultPath -Encoding utf8
+    $raceSucceeded = & $wrapper -Status -StatePath $raceStatePath | ConvertFrom-Json
+    Assert-Equal 'succeeded' $raceSucceeded.status 'A recorded result must succeed after an uncertain worker exit.'
+
     $cleanupOutput = Join-Path $testRoot 'cleanup'
     $cleanupRuns = Join-Path $cleanupOutput '.codex-image-runs'
     [IO.Directory]::CreateDirectory($cleanupRuns) | Out-Null

@@ -190,12 +190,12 @@ if ($Worker) {
 
 if ($Status) {
     $state = Read-JsonFile $StatePath
-    if (Test-ExpectedProcess $state) {
-        $deadlineAt = [DateTime]::Parse(
-            [string]$state.deadlineAt,
-            [Globalization.CultureInfo]::InvariantCulture,
-            [Globalization.DateTimeStyles]::RoundtripKind
-        )
+    $deadlineAt = [DateTime]::Parse(
+        [string]$state.deadlineAt,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind
+    )
+    if (-not (Test-Path -LiteralPath $state.resultPath -PathType Leaf)) {
         if ([DateTime]::UtcNow -gt $deadlineAt.ToUniversalTime()) {
             Write-Json ([ordered]@{
                 status = 'timed_out'
@@ -207,20 +207,17 @@ if ($Status) {
             })
             exit
         }
+
+        $reason = $null
+        if (-not (Test-ExpectedProcess $state)) {
+            $reason = 'The worker process identity could not be verified; waiting for its result file until the deadline.'
+        }
         Write-Json ([ordered]@{
             status = 'running'
             statePath = $StatePath
             processId = $state.processId
             timeoutSeconds = $state.timeoutSeconds
-        })
-        exit
-    }
-
-    if (-not (Test-Path -LiteralPath $state.resultPath -PathType Leaf)) {
-        Write-Json ([ordered]@{
-            status = 'failed'
-            statePath = $StatePath
-            reason = 'The worker exited without recording its exit status.'
+            reason = $reason
             stdoutPath = $state.stdoutPath
             stderrPath = $state.stderrPath
         })
