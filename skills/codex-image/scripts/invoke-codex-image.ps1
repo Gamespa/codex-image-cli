@@ -15,6 +15,16 @@ param(
     [Parameter(ParameterSetName = 'Start')]
     [string]$PromptEnv,
 
+    [Parameter(ParameterSetName = 'Start')]
+    [switch]$Edit,
+
+    [Parameter(ParameterSetName = 'Start')]
+    [Alias('Image')]
+    [string]$SourceImage,
+
+    [Parameter(ParameterSetName = 'Start')]
+    [string]$Mask,
+
     [Parameter(Mandatory, ParameterSetName = 'Start')]
     [string]$OutputDir,
 
@@ -130,7 +140,7 @@ function Remove-ExpiredRuns([string]$RunDir, [int]$Days) {
 if ($Worker) {
     $payload = ConvertFrom-Base64Json $WorkerPayload
     $arguments = @(
-        'generate',
+        [string]$payload.operation,
         '--prompt-env', [string]$payload.promptEnvName,
         '--output-dir', [string]$payload.outputDir,
         '--timeout-seconds', [string]$payload.timeoutSeconds,
@@ -139,6 +149,10 @@ if ($Worker) {
     if ($payload.model) { $arguments += @('--model', [string]$payload.model) }
     if ($payload.size) { $arguments += @('--size', [string]$payload.size) }
     if ([int]$payload.count -ne 1) { $arguments += @('--n', [string]$payload.count) }
+    if ([string]$payload.operation -eq 'edit') {
+        $arguments += @('--image', [string]$payload.image)
+        if ($payload.mask) { $arguments += @('--mask', [string]$payload.mask) }
+    }
 
     $exitCode = 1
     try {
@@ -282,6 +296,32 @@ if ($hasPromptEnv) {
     }
 }
 
+if ($Edit) {
+    if ([string]::IsNullOrWhiteSpace($SourceImage)) {
+        throw 'Pass -Image when using -Edit.'
+    }
+    $resolvedImage = [IO.Path]::GetFullPath($SourceImage)
+    if (-not (Test-Path -LiteralPath $resolvedImage -PathType Leaf)) {
+        throw "Image file does not exist: $resolvedImage"
+    }
+    $resolvedMask = $null
+    if (-not [string]::IsNullOrWhiteSpace($Mask)) {
+        $resolvedMask = [IO.Path]::GetFullPath($Mask)
+        if (-not (Test-Path -LiteralPath $resolvedMask -PathType Leaf)) {
+            throw "Mask file does not exist: $resolvedMask"
+        }
+    }
+    $operation = 'edit'
+}
+else {
+    if ($PSBoundParameters.ContainsKey('SourceImage') -or $PSBoundParameters.ContainsKey('Mask')) {
+        throw 'Use -Edit when passing -Image or -Mask.'
+    }
+    $resolvedImage = $null
+    $resolvedMask = $null
+    $operation = 'generate'
+}
+
 $resolvedCommand = Get-Command $Command -CommandType Application, ExternalScript |
     Select-Object -First 1
 if (-not $resolvedCommand) {
@@ -301,8 +341,11 @@ $stdoutPath = Join-Path $runDir "$runId.stdout.log"
 $stderrPath = Join-Path $runDir "$runId.stderr.log"
 $payload = [ordered]@{
     command = $resolvedCommand.Source
+    operation = $operation
     prompt = $Prompt
     promptEnvName = "CODEX_IMAGE_PROMPT_$runId"
+    image = $resolvedImage
+    mask = $resolvedMask
     outputDir = $resolvedOutputDir
     model = $Model
     size = $Size
@@ -329,6 +372,7 @@ $processStartedAt = $imageProcess.StartTime.ToUniversalTime().ToString('o')
 $deadlineAt = $imageProcess.StartTime.ToUniversalTime().AddSeconds($TimeoutSeconds + 30).ToString('o')
 
 Write-JsonFile ([ordered]@{
+    operation = $operation
     outputDir = $resolvedOutputDir
     expectedCount = $Count
     processId = $imageProcess.Id
@@ -343,6 +387,7 @@ Write-JsonFile ([ordered]@{
 
 Write-Json ([ordered]@{
     status = 'running'
+    operation = $operation
     statePath = $statePath
     processId = $imageProcess.Id
     timeoutSeconds = $TimeoutSeconds

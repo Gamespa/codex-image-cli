@@ -45,6 +45,24 @@ function Get-Argument([string]$Name) {
 
 $promptEnvName = Get-Argument '--prompt-env'
 $prompt = [Environment]::GetEnvironmentVariable($promptEnvName, [EnvironmentVariableTarget]::Process)
+$operation = $CliArguments[0]
+$expectedOperation = if ($env:CODEX_IMAGE_EXPECTED_OPERATION) { $env:CODEX_IMAGE_EXPECTED_OPERATION } else { 'generate' }
+if ($operation -ne $expectedOperation) {
+    [Console]::Error.WriteLine("operation mismatch: $operation")
+    exit 8
+}
+$expectedImage = $env:CODEX_IMAGE_EXPECTED_IMAGE
+$expectedMask = $env:CODEX_IMAGE_EXPECTED_MASK
+if ($operation -eq 'edit') {
+    if ((Get-Argument '--image') -ne $expectedImage) {
+        [Console]::Error.WriteLine('image mismatch')
+        exit 10
+    }
+    if ((Get-Argument '--mask') -ne $expectedMask) {
+        [Console]::Error.WriteLine('mask mismatch')
+        exit 11
+    }
+}
 $outputDir = Get-Argument '--output-dir'
 $countIndex = [Array]::IndexOf($CliArguments, '--n')
 $count = if ($countIndex -ge 0) { [int]$CliArguments[$countIndex + 1] } else { 1 }
@@ -92,6 +110,24 @@ exit 0
     Assert-Equal 'succeeded' $success.status 'A valid JSON summary must succeed.'
     Assert-Equal 0 $success.exitCode 'A successful command must retain exit code zero.'
     Assert-Equal 2 @($success.images).Count 'The wrapper must return the expected image count.'
+
+    $sourceImage = Join-Path $testRoot 'source.png'
+    $maskImage = Join-Path $testRoot 'mask.png'
+    [IO.File]::WriteAllBytes($sourceImage, [byte[]](137, 80, 78, 71, 13, 10, 26, 10))
+    [IO.File]::WriteAllBytes($maskImage, [byte[]](137, 80, 78, 71, 13, 10, 26, 10))
+    $env:CODEX_IMAGE_EXPECTED_OPERATION = 'edit'
+    $env:CODEX_IMAGE_EXPECTED_IMAGE = [IO.Path]::GetFullPath($sourceImage)
+    $env:CODEX_IMAGE_EXPECTED_MASK = [IO.Path]::GetFullPath($maskImage)
+    $editStart = & $wrapper `
+        -Start -Edit -Prompt $env:CODEX_IMAGE_EXPECTED_PROMPT -Image $sourceImage -Mask $maskImage `
+        -OutputDir (Join-Path $testRoot 'edit') -Command $fakeCommand |
+        ConvertFrom-Json
+    $edit = Wait-ForResult $editStart.statePath
+    Assert-Equal 'succeeded' $edit.status 'An edit command must use the source image and mask.'
+    Assert-Equal 1 @($edit.images).Count 'An edit command must return the requested image count.'
+    Remove-Item Env:CODEX_IMAGE_EXPECTED_OPERATION
+    Remove-Item Env:CODEX_IMAGE_EXPECTED_IMAGE
+    Remove-Item Env:CODEX_IMAGE_EXPECTED_MASK
 
     $timeoutProcess = Start-Process -FilePath 'powershell.exe' `
         -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 10') `

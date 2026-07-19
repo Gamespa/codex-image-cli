@@ -104,9 +104,9 @@ therefore does not leave a partial batch that can be mistaken for success.
 ## Codex Skill
 
 The repository includes `skills/codex-image`. Link or copy it to
-`~/.codex/skills/codex-image` after installing the CLI. The skill starts a detached worker, records
-its exit status, validates the CLI JSON summary, and cleans completed run logs older than seven days
-when a new run starts.
+`~/.codex/skills/codex-image` after installing the CLI. The skill starts a detached generation or
+edit worker, records its exit status, validates the CLI JSON summary, and cleans completed run logs
+older than seven days when a new run starts.
 
 ## Development
 
