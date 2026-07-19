@@ -113,3 +113,53 @@ fn rejects_image_counts_above_the_billing_limit() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("1..=10"), "{stderr}");
 }
+
+#[test]
+fn edit_uploads_the_source_image_as_multipart() {
+    let (server, captured_request) = spawn_error_server();
+    let source_dir = tempfile::tempdir().unwrap();
+    let source_image = source_dir.path().join("source.png");
+    let mask_image = source_dir.path().join("mask.png");
+    std::fs::write(&source_image, b"\x89PNG\r\n\x1a\nsource").unwrap();
+    std::fs::write(&mask_image, b"\x89PNG\r\n\x1a\nmask").unwrap();
+
+    let output = Command::new(binary())
+        .args([
+            "edit",
+            "--prompt",
+            "turn the circle blue",
+            "--image",
+            source_image.to_str().unwrap(),
+            "--mask",
+            mask_image.to_str().unwrap(),
+            "--model",
+            "gpt-image-2",
+            "--base-url",
+            &format!("{server}/v1"),
+            "--no-auth",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let request = captured_request
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+    let request_text = String::from_utf8_lossy(&request);
+    assert!(request_text.starts_with("POST /v1/images/edits "));
+    assert!(
+        request_text
+            .to_ascii_lowercase()
+            .contains("content-type: multipart/form-data; boundary=")
+    );
+    assert!(request_text.contains("name=\"prompt\""));
+    assert!(request_text.contains("turn the circle blue"));
+    assert!(request_text.contains("name=\"model\""));
+    assert!(request_text.contains("name=\"image\"; filename=\"source.png\""));
+    assert!(request_text.contains("name=\"mask\"; filename=\"mask.png\""));
+    assert!(
+        request
+            .windows(b"\x89PNG\r\n\x1a\nsource".len())
+            .any(|part| part == b"\x89PNG\r\n\x1a\nsource")
+    );
+}

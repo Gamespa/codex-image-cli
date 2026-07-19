@@ -25,6 +25,23 @@ Images are written to `generated_images/` by default. A successful command print
 summary containing the model, generated paths, and any upstream URLs. PNG, JPEG, WebP, and GIF are
 recognized from their file signatures instead of being assigned a fixed extension.
 
+## Edit an Image
+
+Use `edit` to send a source image to the provider's OpenAI-compatible `POST /v1/images/edits`
+endpoint. `--mask` is optional; transparent areas identify the regions available for editing.
+
+```powershell
+codex-image edit `
+  --image .\source.png `
+  --mask .\mask.png `
+  --prompt "Replace the background with a cloudy sky" `
+  --model gpt-image-2
+```
+
+Source images and masks must be PNG, JPEG, WebP, or GIF files and are each subject to
+`--max-image-mib` (50 MiB by default). The selected provider must support `/v1/images/edits` for
+this command.
+
 Generation is bounded to 10 images, 50 MiB per image, and 180 seconds overall by default. Override
 the operational limits when needed. Base64 API responses also have an 80 MiB total JSON limit:
 

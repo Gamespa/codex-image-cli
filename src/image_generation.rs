@@ -7,7 +7,10 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use reqwest::blocking::Client;
+use reqwest::blocking::{
+    Client, Response,
+    multipart::{Form, Part},
+};
 use serde::{Deserialize, Serialize};
 use tempfile::Builder;
 
@@ -21,6 +24,18 @@ pub const MAX_IMAGE_COUNT: u32 = 10;
 
 pub struct GenerationRequest {
     pub prompt: String,
+    pub model: String,
+    pub size: String,
+    pub image_count: u32,
+    pub output_dir: PathBuf,
+    pub timeout: Duration,
+    pub max_image_bytes: u64,
+}
+
+pub struct EditRequest {
+    pub prompt: String,
+    pub image: PathBuf,
+    pub mask: Option<PathBuf>,
     pub model: String,
     pub size: String,
     pub image_count: u32,
@@ -131,46 +146,126 @@ pub fn generate_images(
     if let Some(api_key) = connection.api_key() {
         request_builder = request_builder.bearer_auth(api_key);
     }
-    let mut response = request_builder
+    let response = request_builder
         .timeout(remaining(deadline)?)
         .send()
         .context("send image generation request")?;
+    let images = process_image_response(
+        &client,
+        deadline,
+        response,
+        request.image_count,
+        &request.output_dir,
+        request.max_image_bytes,
+        "generation",
+    )?;
+    Ok(GenerationSummary {
+        model: request.model.clone(),
+        images,
+    })
+}
+
+pub fn edit_images(
+    connection: &CodexConnection,
+    request: &EditRequest,
+) -> Result<GenerationSummary> {
+    validate_request(
+        &request.prompt,
+        &request.model,
+        &request.size,
+        request.image_count,
+        request.timeout,
+        request.max_image_bytes,
+    )?;
+
+    let deadline = Instant::now() + request.timeout;
+    let client = Client::builder()
+        .connect_timeout(request.timeout.min(Duration::from_secs(30)))
+        .user_agent(USER_AGENT)
+        .build()
+        .context("build HTTP client")?;
+    let mut form = Form::new()
+        .text("model", request.model.clone())
+        .text("prompt", request.prompt.clone())
+        .text("n", request.image_count.to_string())
+        .text("size", request.size.clone())
+        .part(
+            "image",
+            image_part(&request.image, request.max_image_bytes).context("prepare source image")?,
+        );
+    if let Some(mask) = request.mask.as_deref() {
+        form = form.part(
+            "mask",
+            image_part(mask, request.max_image_bytes).context("prepare mask image")?,
+        );
+    }
+    let endpoint = format!(
+        "{}/images/edits",
+        connection.base_url().trim_end_matches('/')
+    );
+    let mut request_builder = client.post(&endpoint).multipart(form);
+    if let Some(api_key) = connection.api_key() {
+        request_builder = request_builder.bearer_auth(api_key);
+    }
+    let response = request_builder
+        .timeout(remaining(deadline)?)
+        .send()
+        .context("send image edit request")?;
+    let images = process_image_response(
+        &client,
+        deadline,
+        response,
+        request.image_count,
+        &request.output_dir,
+        request.max_image_bytes,
+        "edit",
+    )?;
+    Ok(GenerationSummary {
+        model: request.model.clone(),
+        images,
+    })
+}
+
+fn process_image_response(
+    client: &Client,
+    deadline: Instant,
+    mut response: Response,
+    image_count: u32,
+    output_dir: &Path,
+    max_image_bytes: u64,
+    operation: &str,
+) -> Result<Vec<GeneratedImage>> {
     let status = response.status();
     if !status.is_success() {
         let response_body = read_prefix(&mut response, MAX_ERROR_BYTES)
-            .context("read image generation error response")?;
+            .with_context(|| format!("read image {operation} error response"))?;
         let response_body = String::from_utf8_lossy(&response_body);
         bail!(
-            "image generation failed with HTTP {status}: {}",
+            "image {operation} failed with HTTP {status}: {}",
             truncate_error(&response_body)
         );
     }
     let response_body = read_bounded(
         &mut response,
         MAX_RESPONSE_BYTES,
-        "image generation response",
+        &format!("image {operation} response"),
     )?;
     let payload: ImagesGenerationsResponse =
         serde_json::from_slice(&response_body).context("parse image generation response")?;
-    if payload.data.len() != request.image_count as usize {
+    if payload.data.len() != image_count as usize {
         bail!(
-            "image generation returned {} images; expected {}",
+            "image {operation} returned {} images; expected {}",
             payload.data.len(),
-            request.image_count
+            image_count
         )
     }
 
-    fs::create_dir_all(&request.output_dir)
-        .with_context(|| format!("create output directory {}", request.output_dir.display()))?;
+    fs::create_dir_all(output_dir)
+        .with_context(|| format!("create output directory {}", output_dir.display()))?;
     let staging = Builder::new()
         .prefix(".codex-image-run-")
-        .tempdir_in(&request.output_dir)
-        .with_context(|| {
-            format!(
-                "create staging directory in {}",
-                request.output_dir.display()
-            )
-        })?;
+        .tempdir_in(output_dir)
+        .with_context(|| format!("create staging directory in {}", output_dir.display()))?;
     let run_id = staging
         .path()
         .file_name()
@@ -182,11 +277,11 @@ pub fn generate_images(
     for (index, image) in payload.data.into_iter().enumerate() {
         let staged_path = staging.path().join(format!("image-{}.tmp", index + 1));
         if let Some(encoded) = image.b64_json.as_deref() {
-            ensure_encoded_size(encoded.len(), request.max_image_bytes)?;
+            ensure_encoded_size(encoded.len(), max_image_bytes)?;
             let bytes = STANDARD
                 .decode(encoded)
                 .context("decode b64_json image data")?;
-            if bytes.len() as u64 > request.max_image_bytes {
+            if bytes.len() as u64 > max_image_bytes {
                 bail!(
                     "decoded image {} exceeds the configured size limit",
                     index + 1
@@ -195,19 +290,13 @@ pub fn generate_images(
             fs::write(&staged_path, &bytes)
                 .with_context(|| format!("write {}", staged_path.display()))?;
         } else if let Some(url) = image.url.as_deref() {
-            download_image(
-                &client,
-                url,
-                &staged_path,
-                request.max_image_bytes,
-                deadline,
-            )?;
+            download_image(client, url, &staged_path, max_image_bytes, deadline)?;
         } else {
             return Err(anyhow!("image response item had neither b64_json nor url"));
         }
 
         let format = detect_image_format_file(&staged_path)?;
-        let final_path = request.output_dir.join(format!(
+        let final_path = output_dir.join(format!(
             "codex-image-{run_id}-{}.{}",
             index + 1,
             format.extension()
@@ -219,11 +308,66 @@ pub fn generate_images(
         });
     }
 
-    let images = commit_images(staged_images)?;
-    Ok(GenerationSummary {
-        model: request.model.clone(),
-        images,
-    })
+    commit_images(staged_images)
+}
+
+fn validate_request(
+    prompt: &str,
+    model: &str,
+    size: &str,
+    image_count: u32,
+    timeout: Duration,
+    max_image_bytes: u64,
+) -> Result<()> {
+    if prompt.trim().is_empty() {
+        bail!("--prompt must not be empty")
+    }
+    if prompt.len() > MAX_PROMPT_BYTES {
+        bail!("--prompt exceeds the {MAX_PROMPT_BYTES}-byte limit")
+    }
+    if model.trim().is_empty() {
+        bail!("--model must not be empty")
+    }
+    if size.trim().is_empty() {
+        bail!("--size must not be empty")
+    }
+    if !(1..=MAX_IMAGE_COUNT).contains(&image_count) {
+        bail!("--n must be between 1 and {MAX_IMAGE_COUNT}")
+    }
+    if timeout.is_zero() {
+        bail!("generation timeout must be greater than zero")
+    }
+    if max_image_bytes == 0 {
+        bail!("maximum image size must be greater than zero")
+    }
+    Ok(())
+}
+
+fn image_part(path: &Path, max_image_bytes: u64) -> Result<Part> {
+    let metadata = fs::metadata(path).with_context(|| format!("read {}", path.display()))?;
+    if metadata.len() > max_image_bytes {
+        bail!("{} exceeds the configured size limit", path.display())
+    }
+    let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    if bytes.len() as u64 > max_image_bytes {
+        bail!("{} exceeds the configured size limit", path.display())
+    }
+    let format = detect_image_format(&bytes)
+        .with_context(|| format!("validate image {}", path.display()))?;
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("image file name is not valid Unicode")?;
+    let mime = match format {
+        ImageFormat::Png => "image/png",
+        ImageFormat::Jpeg => "image/jpeg",
+        ImageFormat::Webp => "image/webp",
+        ImageFormat::Gif => "image/gif",
+    };
+    Part::bytes(bytes)
+        .file_name(filename.to_owned())
+        .mime_str(mime)
+        .context("set image MIME type")
 }
 
 fn ensure_encoded_size(encoded_len: usize, max_image_bytes: u64) -> Result<()> {
@@ -312,7 +456,7 @@ fn detect_image_format(bytes: &[u8]) -> Result<ImageFormat> {
     if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
         return Ok(ImageFormat::Gif);
     }
-    bail!("generated data is not a supported PNG, JPEG, WebP, or GIF image")
+    bail!("data is not a supported PNG, JPEG, WebP, or GIF image")
 }
 
 fn commit_images(staged_images: Vec<StagedImage>) -> Result<Vec<GeneratedImage>> {
